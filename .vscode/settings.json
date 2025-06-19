@@ -1,0 +1,15 @@
+{
+    "sqltools.connections": [
+        {
+            "previewLimit": 50,
+            "server": "146.56.164.72",
+            "port": 5432,
+            "driver": "PostgreSQL",
+            "name": "posco",
+            "database": "postgres",
+            "password": "postgres",
+            "username": "postgres",
+            "group": "posco"
+        }
+    ]
+}

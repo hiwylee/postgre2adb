@@ -17,24 +17,44 @@ OS_VERSION=$(grep -oP '(?<=^VERSION_ID=).+' /etc/os-release | tr -d '"' | cut -d
 
 echo "- OS: $OS_ID $OS_VERSION"
 
-# 1. 시스템 업데이트
-echo "1. 시스템 업데이트 중..."
-sudo apt update
-sudo apt upgrade -y
+# 1. 시스템 업데이트 및 저장소 설정
+echo "1. 시스템 업데이트 및 저장소 설정 중..."
+if command -v dnf &> /dev/null; then
+    # MySQL 저장소 비활성화 (존재하는 경우)
+    if [ -f /etc/yum.repos.d/mysql-community.repo ]; then
+        sudo sed -i 's/^enabled=1/enabled=0/' /etc/yum.repos.d/mysql-community.repo
+    fi
+    
+    # 시스템 업데이트 (GPG 검증 비활성화)
+    sudo dnf update -y --nogpgcheck
+else
+    # MySQL 저장소 비활성화 (존재하는 경우)
+    if [ -f /etc/yum.repos.d/mysql-community.repo ]; then
+        sudo sed -i 's/^enabled=1/enabled=0/' /etc/yum.repos.d/mysql-community.repo
+    fi
+    
+    # 시스템 업데이트 (GPG 검증 비활성화)
+    sudo yum update -y --nogpgcheck
+fi
 
 # 2. 방화벽 설정
 echo -e "\n2. 방화벽 설정 중..."
 
-# firewalld (Oracle Linux/RHEL/CentOS)
-if command -v dnf &> /dev/null || command -v yum &> /dev/null; then
+# firewalld 설정
+if command -v firewall-cmd &> /dev/null; then
     echo "- firewalld 설정 확인 중..."
-    sudo systemctl enable --now firewalld 2>/dev/null || true
+    
+    # firewalld 서비스가 실행 중인지 확인하고 실행
+    if ! systemctl is-active --quiet firewalld; then
+        echo "  - firewalld 서비스를 시작합니다."
+        sudo systemctl enable --now firewalld
+    fi
     
     # 포트가 이미 열려있는지 확인
     if ! sudo firewall-cmd --list-ports 2>/dev/null | grep -q '5432/tcp'; then
         echo "  - PostgreSQL 포트(5432)를 엽니다."
-        sudo firewall-cmd --permanent --add-port=5432/tcp 2>/dev/null || true
-        sudo firewall-cmd --reload 2>/dev/null || true
+        sudo firewall-cmd --permanent --add-port=5432/tcp
+        sudo firewall-cmd --reload
         echo "  - PostgreSQL 포트(5432)가 영구적으로 열렸습니다."
     else
         echo "  - PostgreSQL 포트(5432)가 이미 열려 있습니다."
@@ -45,39 +65,89 @@ if command -v dnf &> /dev/null || command -v yum &> /dev/null; then
         echo "- SELinux 설정 확인 중..."
         if getenforce | grep -q "Enforcing"; then
             echo "  - SELinux가 Enforcing 모드입니다. PostgreSQL 포트를 허용합니다."
-            sudo yum install -y policycoreutils-python-utils 2>/dev/null || sudo dnf install -y policycoreutils-python-utils 2>/dev/null || true
-            sudo semanage port -a -t postgresql_port_t -p tcp 5432 2>/dev/null || true
+            if command -v dnf &> /dev/null; then
+                sudo dnf install -y policycoreutils-python-utils
+            else
+                sudo yum install -y policycoreutils-python-utils
+            fi
+            sudo semanage port -a -t postgresql_port_t -p tcp 5432 2>/dev/null || \
+            echo "  - semanage 명령 실행에 실패했습니다. 수동으로 확인이 필요할 수 있습니다."
         fi
     fi
-# ufw (Ubuntu/Debian)
-elif command -v ufw &> /dev/null; then
-    echo "- ufw 설정 확인 중..."
-    
-    # ufw가 비활성화된 경우에만 활성화
-    if ! sudo ufw status | grep -q 'Status: active'; then
-        echo "  - UFW를 활성화합니다."
-        sudo ufw --force enable
-    fi
-    
-    # 포트가 이미 허용되었는지 확인
-    if ! sudo ufw status | grep -q '5432/tcp'; then
-        echo "  - PostgreSQL 포트(5432)를 허용합니다."
-        sudo ufw allow 5432/tcp
-        echo "  - PostgreSQL 포트(5432)가 허용되었습니다."
-    else
-        echo "  - PostgreSQL 포트(5432)가 이미 허용되어 있습니다."
-    fi
 else
-    echo "- 기본 방화벽이 감지되지 않았습니다. 수동으로 포트를 열어주세요."
+    echo "- firewalld가 설치되어 있지 않습니다. 방화벽 설정을 위해 firewalld를 설치하세요."
+    echo "  sudo yum install -y firewalld"
+    echo "  sudo systemctl enable --now firewalld"
 fi
 
 # 3. PostgreSQL 설치
 echo -e "\n3. PostgreSQL 설치 중..."
-sudo apt install -y postgresql postgresql-contrib postgresql-server-dev-all
+
+# PostgreSQL 저장소 설정
+if command -v dnf &> /dev/null; then
+    # Oracle Linux 8 이상
+    echo "- PostgreSQL 저장소 설정 중..."
+    
+    # 기존 PostgreSQL 모듈 비활성화
+    sudo dnf -qy module disable postgresql
+    
+    # PostgreSQL 공통 저장소 추가
+    sudo dnf install -y https://download.postgresql.org/pub/repos/yum/reporpms/EL-8-x86_64/pgdg-redhat-repo-latest.noarch.rpm
+    
+    # 설치 전 저장소 확인
+    echo "- 사용 가능한 저장소 목록:"
+    sudo dnf repolist | grep -i postgres
+    
+    # PostgreSQL 15 설치
+    echo "- PostgreSQL 15 패키지 설치 중..."
+    sudo dnf install -y postgresql15-server postgresql15-contrib postgresql15-devel
+    
+    # 데이터베이스 초기화
+    echo "- 데이터베이스 초기화 중..."
+    sudo /usr/pgsql-15/bin/postgresql-15-setup initdb
+    
+    # 인증 설정 수정 (md5 인증 활성화)
+    echo "- 인증 설정 수정 중..."
+    sudo sed -i 's/ident/md5/g' /var/lib/pgsql/15/data/pg_hba.conf
+    
+    # 서비스 시작
+    echo "- PostgreSQL 서비스 시작 중..."
+    sudo systemctl enable --now postgresql-15
+    sudo systemctl restart postgresql-15
+else
+    # Oracle Linux 7
+    echo "- PostgreSQL 저장소 설정 중..."
+    sudo yum install -y https://download.postgresql.org/pub/repos/yum/reporpms/EL-7-x86_64/pgdg-redhat-repo-latest.noarch.rpm
+    
+    # PostgreSQL 15 설치
+    echo "- PostgreSQL 15 패키지 설치 중..."
+    sudo yum install -y postgresql15-server postgresql15-contrib postgresql15-devel
+    
+    # 데이터베이스 초기화
+    echo "- 데이터베이스 초기화 중..."
+    sudo /usr/pgsql-15/bin/postgresql-15-setup initdb
+    
+    # 인증 설정 수정 (md5 인증 활성화)
+    echo "- 인증 설정 수정 중..."
+    sudo sed -i 's/ident/md5/g' /var/lib/pgsql/15/data/pg_hba.conf
+    
+    # 서비스 시작
+    echo "- PostgreSQL 서비스 시작 중..."
+    sudo systemctl enable --now postgresql-15
+    sudo systemctl restart postgresql-15
+fi
+
+# PostgreSQL 서비스 상태 확인
+echo -e "\n- PostgreSQL 서비스 상태 확인 중..."
+systemctl status postgresql-15 --no-pager
 
 # 4. Oracle Instant Client 설치
 echo -e "\n4. Oracle Instant Client 설치 중..."
-sudo apt install -y libaio1 unzip
+if command -v dnf &> /dev/null; then
+    sudo dnf install -y libaio unzip wget
+else
+    sudo yum install -y libaio unzip wget
+fi
 
 # Oracle Instant Client 다운로드
 echo "   - Oracle Instant Client 다운로드 중..."
@@ -145,7 +215,7 @@ fi
 
 echo -e "\n=== 다음 단계 ==="
 echo "1. 샘플 데이터베이스 설치 (선택사항):"
-echo "   $ cd ~/postgre/scripts"
+echo "   $ cd ~/postgre2adb/scripts"
 echo "   $ chmod +x install_sample_databases.sh"
 echo "   $ sudo ./install_sample_databases.sh"
 echo -e "\n2. Oracle 서버 연결 설정:"

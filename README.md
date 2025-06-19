@@ -25,8 +25,8 @@
 
 1. 저장소 복제:
    ```bash
-   git clone [저장소 URL]
-   cd [저장소 디렉토리]
+   git clone https://github.com/hiwylee/postgre2adb.git
+   cd postgre2adb
    ```
 
 2. 설치 스크립트 실행:
